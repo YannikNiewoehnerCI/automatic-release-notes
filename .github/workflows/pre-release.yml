@@ -9,7 +9,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  prerelease:
+  pre-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +30,11 @@ jobs:
 
           LAST_PUBLISHED_AT="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${LAST}" --jq '.published_at' 2>/dev/null || true)"
           if [ -z "${LAST_PUBLISHED_AT:-}" ] || [ "${LAST_PUBLISHED_AT}" = "null" ]; then
-            LAST_PUBLISHED_AT="$(git log -1 --format=%cI "${LAST}" || true)"
+            # If LAST is not a real tag yet, fall back to an "old" timestamp so we include everything.
+            LAST_PUBLISHED_AT="$(git log -1 --format=%cI "${LAST}" 2>/dev/null || true)"
+          fi
+          if [ -z "${LAST_PUBLISHED_AT:-}" ]; then
+            LAST_PUBLISHED_AT="1970-01-01T00:00:00Z"
           fi
 
           OWNER="${GITHUB_REPOSITORY%/*}"
@@ -127,10 +131,18 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           PREV="${{ steps.meta.outputs.last_stable }}"
 
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$TAG" \
-            -f previous_tag_name="$PREV" \
-            --jq '.body' > RELEASE_NOTES.md
+          if [ -z "$PREV" ] || [ "$PREV" = "v0.0.0" ]; then
+            echo "No previous stable tag found -> generating notes without previous_tag_name"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" \
+              --jq '.body' > RELEASE_NOTES.md
+          else
+            echo "Using previous stable tag: $PREV"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" \
+              -f previous_tag_name="$PREV" \
+              --jq '.body' > RELEASE_NOTES.md
+          fi
 
           echo "## Pre-Release ${TAG} - $(date +%F)" | cat - RELEASE_NOTES.md > tmp && mv tmp RELEASE_NOTES.md
 
