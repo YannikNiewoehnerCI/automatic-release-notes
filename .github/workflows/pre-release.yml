@@ -9,7 +9,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  pre-release:
+  pre-release-notes-generation:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
