@@ -9,7 +9,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  release:
+  release-notes-generation:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,23 +23,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1) Find last stable tag vX.Y.Z
+          # 1️⃣ Find last stable tag
           LAST="$(git tag --list 'v*.*.*' --sort=-creatordate | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
           if [ -z "$LAST" ]; then
             LAST="v0.0.0"
           fi
 
-          # 2) Decide time window since last stable release (publishedAt), fallback to tag date
-          LAST_PUBLISHED_AT="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${LAST}" --jq '.published_at' 2>/dev/null || true)"
-          if [ -z "${LAST_PUBLISHED_AT:-}" ] || [ "${LAST_PUBLISHED_AT}" = "null" ]; then
-            # fallback: use tag date
-            LAST_PUBLISHED_AT="$(git log -1 --format=%cI "${LAST}" || true)"
+          echo "Last stable tag: $LAST"
+
+          # 2️⃣ Determine release window
+          if [ "$LAST" = "v0.0.0" ]; then
+            LAST_PUBLISHED_AT="1970-01-01T00:00:00Z"
+          else
+            LAST_PUBLISHED_AT="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${LAST}" --jq '.published_at' 2>/dev/null || true)"
+            if [ -z "${LAST_PUBLISHED_AT:-}" ] || [ "${LAST_PUBLISHED_AT}" = "null" ]; then
+              LAST_PUBLISHED_AT="$(git log -1 --format=%cI "${LAST}" || true)"
+            fi
           fi
 
-          echo "Last stable tag: $LAST"
           echo "Collect PRs merged after: $LAST_PUBLISHED_AT"
 
-          # 3) Fetch recent merged PRs into main and filter by mergedAt
           OWNER="${GITHUB_REPOSITORY%/*}"
           REPO="${GITHUB_REPOSITORY#*/}"
 
@@ -59,7 +62,6 @@ jobs:
               }
             }' -f owner="$OWNER" -f name="$REPO" > prs.json
 
-          # Filter: merged into main AND mergedAt > LAST_PUBLISHED_AT
           jq -c --arg since "$LAST_PUBLISHED_AT" '
             .data.repository.pullRequests.nodes
             | map(select(.baseRefName == "main"))
@@ -69,8 +71,7 @@ jobs:
           COUNT="$(jq 'length' prs_since.json)"
           echo "Merged PRs since last release: $COUNT"
 
-          # 4) Determine bump level from labels
-          # Priority: removed > feature > patch (bug/security/documentation) > default patch
+          # 3️⃣ Determine bump level
           HAS_REMOVED="$(jq '[.[].labels.nodes[].name] | any(. == "removed")' prs_since.json)"
           HAS_FEATURE="$(jq '[.[].labels.nodes[].name] | any(. == "feature")' prs_since.json)"
           HAS_PATCH="$(jq '[.[].labels.nodes[].name] | any(. == "bug" or . == "security" or . == "documentation")' prs_since.json)"
@@ -82,13 +83,12 @@ jobs:
           elif [ "$HAS_PATCH" = "true" ]; then
             BUMP="patch"
           else
-            # If nothing matched (e.g., unlabeled PRs), still do patch to keep flow moving
             BUMP="patch"
           fi
 
           echo "Bump level: $BUMP"
 
-          # 5) Bump version
+          # 4️⃣ Bump version
           VER="${LAST#v}"
           MAJ="$(echo "$VER" | cut -d. -f1)"
           MIN="$(echo "$VER" | cut -d. -f2)"
@@ -102,12 +102,11 @@ jobs:
 
           NEXT="v${MAJ}.${MIN}.${PAT}"
 
+          echo "Next stable tag: $NEXT"
+
           echo "last=$LAST" >> "$GITHUB_OUTPUT"
           echo "next=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "since=$LAST_PUBLISHED_AT" >> "$GITHUB_OUTPUT"
           echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
-
-          echo "Next stable tag: $NEXT"
 
       - name: "Guard: skip if stable release already exists"
         id: guard
@@ -128,8 +127,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.meta.outputs.next }}"
+
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists -> skipping."
+            echo "Tag $TAG already exists locally."
           else
             git tag "$TAG"
             git push origin "$TAG"
@@ -144,10 +144,18 @@ jobs:
           TAG="${{ steps.meta.outputs.next }}"
           PREV="${{ steps.meta.outputs.last }}"
 
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$TAG" \
-            -f previous_tag_name="$PREV" \
-            --jq '.body' > RELEASE_NOTES.md
+          if [ -z "$PREV" ] || [ "$PREV" = "v0.0.0" ]; then
+            echo "No previous stable tag found -> generating notes without previous_tag_name"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" \
+              --jq '.body' > RELEASE_NOTES.md
+          else
+            echo "Using previous stable tag: $PREV"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" \
+              -f previous_tag_name="$PREV" \
+              --jq '.body' > RELEASE_NOTES.md
+          fi
 
           echo "## ${TAG} - $(date +%F)" | cat - RELEASE_NOTES.md > tmp && mv tmp RELEASE_NOTES.md
 
